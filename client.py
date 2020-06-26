@@ -1,100 +1,116 @@
 import socket
 import pickle
 import select
+import sys
 import numpy as np
 import pandas as pd
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense
-from tensorflow.keras import optimizers
 
-HEADER_LENGTH = 10
+class Client:
 
-IP = socket.gethostname()
-PORT = 5000
+    def __init__(self, MODEL, weights_path, HEADER_LENGTH = 10, IP = socket.gethostname(), PORT = 5000):
 
-client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-client_socket.connect((IP, PORT))
+        self.HEADER_LENGTH =  HEADER_LENGTH
+        self.IP = IP
+        self.PORT = PORT
 
-MODEL = None
-STOP_FLAG = False
-rounds = 0
+        self.weights_path = weights_path
 
-###########################################################################
+        self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.client_socket.connect((IP, PORT))
 
-def send_model(client_socket):
-    data = np.array(MODEL.get_weights())
-    data = pickle.dumps(data)
-    data = bytes(f"{len(data):<{HEADER_LENGTH}}", 'utf-8') + data
-    client_socket.sendall(data)
+        self.MODEL = MODEL
+        self.STOP_FLAG = False
+        self.rounds = 0
 
 
-def receive(client_socket):
-    try:
+    def send_model(self):
+        data = np.array(self.MODEL.get_weights())
+        data = pickle.dumps(data)
+        data = bytes(f"{len(data):<{self.HEADER_LENGTH}}", 'utf-8') + data
+        self.client_socket.sendall(data)
 
 
-        message_header = client_socket.recv(HEADER_LENGTH)
-        if not len(message_header):
-            return False
+    def receive(self):
+        try:
 
-        message_length = int(message_header.decode('utf-8').strip())
+            message_header = self.client_socket.recv(self.HEADER_LENGTH)
+            if not len(message_header):
+                return False
 
-        full_msg = b''
-        while True:
-            msg = client_socket.recv(message_length)
+            message_length = int(message_header.decode('utf-8').strip())
 
-            full_msg += msg
+            full_msg = b''
+            while True:
+                msg = self.client_socket.recv(message_length)
 
-            if len(full_msg) == message_length:
+                full_msg += msg
+
+                if len(full_msg) == message_length:
+                    break
+            
+            data = pickle.loads(full_msg)
+
+            self.STOP_FLAG = data["STOP_FLAG"]
+
+            return data["WEIGHTS"]
+
+        except Exception as e:
+            print(e)
+
+
+    def fetch_model(self):
+        data = self.receive()
+
+        self.MODEL.set_weights(data)
+
+        np.save(self.weights_path,data)
+
+    def train(self):
+        self.MODEL.fit()
+
+    def run(self):
+
+        while not self.STOP_FLAG:
+
+            read_sockets, _, exception_sockets = select.select([self.client_socket], [], [self.client_socket])
+
+            for soc in read_sockets:
+                self.fetch_model()
+            
+            if self.STOP_FLAG:
                 break
-        
-        data = pickle.loads(full_msg)
 
-        STOP_FLAG = data["STOP_FLAG"]
+            print(f"Model version: {self.rounds} fetched")
 
-        return data["WEIGHTS"]
+            self.rounds += 1
+            print(f"Training cycle: {self.rounds}")
+            self.train()
 
+            print(f"Sent local model")
+            self.send_model()
 
-    except Exception as e:
-        print(e)
-
-
-def fetch_model(client_socket):
-    global MODEL
-
-    data = receive(client_socket)
-       
-    if MODEL == None:
-        model = Sequential()
-        model.add(Dense(1, activation = 'linear', input_dim = 10))
-        model.compile(optimizer=optimizers.RMSprop(lr=0.1), loss='mean_squared_error', metrics=['mae'])
-        MODEL = model
-
-    MODEL.set_weights(data)
-
-def train():
-    global MODEL
-
-    df = pd.read_csv("data1.csv")
-    x = df[["x1","x2","x3","x4","x5","x6","x7","x8","x9","x10"]]
-    y = df["y"]
-
-    MODEL.fit(x,y,epochs =200,batch_size = 50)
+        print("Training Done")
 
 
-while not STOP_FLAG:
+if __name__ == "__main__":
 
-    read_sockets, _, exception_sockets = select.select([client_socket], [], [client_socket])
+    from models.model import Model
 
-    for soc in read_sockets:
-        fetch_model(soc)
+    path_weights = sys.argv[1]
+    path_node_partition = sys.argv[2]
+    path_edge_partition = sys.argv[3]
 
-    print(f"Model version: {rounds} fetched")
+    nodes = pd.read_csv(path_node_partition , sep='\t', lineterminator='\n',header=None).loc[:,0:1433]
+    nodes.set_index(0,inplace=True)
 
-    rounds += 1
-    print(f"Training cycle: {rounds}")
-    train()
+    edges = pd.read_csv(path_edge_partition , sep='\s+', lineterminator='\n', header=None)
+    edges.columns = ["source","target"] 
 
-    print(f"Sent local model")
-    send_model(client_socket)
+    model = Model(nodes,edges)
+    model.initialize()
 
-print("Training Done")
+    client = Client(model,weights_path=path_weights)
+
+    client.run()
+
+    

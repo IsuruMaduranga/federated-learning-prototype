@@ -4,30 +4,28 @@ import select
 import time
 import numpy as np
 import pandas as pd
-import sys
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense
+from tensorflow.keras import optimizers
 
 class Server:
 
-    def __init__(self, MODEL, ROUNDS , weights_path, HEADER_LENGTH = 10, IP= socket.gethostname(), PORT = 5000, MAX_CONN = 5):
+    def __init__(self, ROUNDS , HEADER_LENGTH = 10, HOST = socket.gethostname(), PORT = 5000, MAX_CONN = 5):
 
         # Parameters
         self.HEADER_LENGTH =  HEADER_LENGTH
-        self.IP = IP
+        self.HOST= HOST
         self.PORT = PORT
         self.MAX_CONN = MAX_CONN
         self.ROUNDS = ROUNDS
 
-        self.weights_path = weights_path
-
         # Global model
-        self.GLOBAL_MODEL = MODEL
+        self.GLOBAL_MODEL = self.initialize_model()
 
         self.global_modlel_ready = False
 
         self.weights = []
         self.training_cycles = 0
-
-        self.stop_flag = False
 
         # List of sockets for select.select()
         self.sockets_list = []
@@ -36,10 +34,18 @@ class Server:
         # Craete server socket
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.server_socket.bind((self.IP, self.PORT))
+        self.server_socket.bind((self.HOST, self.PORT))
         self.server_socket.listen(self.MAX_CONN)
 
         self.sockets_list.append(self.server_socket)
+
+
+    def initialize_model(self):
+        # Simple linear regression model
+        model = Sequential()
+        model.add(Dense(1, activation = 'linear', input_dim = 10))
+        model.compile(optimizer=optimizers.RMSprop(lr=0.1), loss='mean_squared_error', metrics=['mae'])
+        return model
 
     def update_model(self,new_weights):
         self.weights.append(new_weights)
@@ -52,8 +58,6 @@ class Server:
             w = (w1+w2)/2
             self.GLOBAL_MODEL.set_weights(w)
 
-            np.save(self.weights_path,w)
-
             self.training_cycles += 1
             print(f"Training cycle {self.training_cycles} done!")
 
@@ -63,18 +67,18 @@ class Server:
 
     def send_model(self, client_socket):
 
+        stop_flag = False
         if self.ROUNDS == self.training_cycles:
-            self.stop_flag = True
+            stop_flag = True
 
         weights = np.array(self.GLOBAL_MODEL.get_weights())
 
-        data = {"STOP_FLAG":self.stop_flag,"WEIGHTS":weights}
+        data = {"STOP_FLAG":stop_flag,"WEIGHTS":weights}
 
         data = pickle.dumps(data)
         data = bytes(f"{len(data):<{self.HEADER_LENGTH}}", 'utf-8') + data
 
         client_socket.sendall(data)
-        print('Sent global model to: {}'.format(self.clients[client_socket]))
 
 
     def receive(self, client_socket):
@@ -108,7 +112,7 @@ class Server:
 
     def run(self):
 
-        while not self.stop_flag:
+        while True:
 
             read_sockets, write_sockets, exception_sockets = select.select(self.sockets_list, [], self.sockets_list)
 
@@ -141,27 +145,8 @@ class Server:
                 self.sockets_list.remove(notified_socket)
                 del self.clients[notified_socket]
 
-        print("Federated training done!")
-
 
 if __name__ == "__main__":
-
-    from models.model import Model
-
-    # Inputes
-    path_weights = sys.argv[1]
-    path_node_partition = sys.argv[2]
-    path_edge_partition = sys.argv[3]
-
-    nodes = pd.read_csv(path_node_partition , sep='\t', lineterminator='\n',header=None).loc[:,0:1433]
-    nodes.set_index(0,inplace=True)
-
-    edges = pd.read_csv(path_edge_partition , sep='\s+', lineterminator='\n', header=None)
-    edges.columns = ["source","target"] 
-
-    model = Model(nodes,edges)
-    model.initialize()
     
-    server = Server(model,ROUNDS=2,weights_path=path_weights)
-
+    server = Server(ROUNDS=3)
     server.run()

@@ -1,0 +1,5 @@
+python server.py ./weights/weights.npy ./data/4_attributes_0 ./data/4_0
+
+python client.py ./weights/weights_0.npy ./data/4_attributes_0 ./data/4_0
+
+python client.py ./weights/weights_1.npy ./data/4_attributes_1 ./data/4_1
